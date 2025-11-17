@@ -1,52 +1,96 @@
-# # # # # # # # # # #
-#  自动构建 NEWIFI3
-#     花妆男
-# # # # # # # # # # #
 name: Padavan CI NEWIFI3
+
 on:
   workflow_dispatch:
-  # schedule:                           # 时间表
-  #   - cron: '0 19 * * *'              # 每天国际时间19点，北京时间凌晨3点执行(北京+8)
-  push: # push 操作
-    branches: # 分支
-      - master # 主分支
-    #   paths:                            # 路径
-    #     - padavan/*                     # 监听Padavan目录下所有文件的push操作
-    paths: # 路径
-      - logs/n3.md # 监听logs目录下 n3.md 的push操作
-  # watch:                              # 监视操作
-  #   types: [started]                  # 点击 star 之后
+  push:
+    branches:
+      - master
+    paths:
+      - logs/n3.md
+
 env:
-  DEVICES: "PSG1218" # 设备名字数组
-  UPLOAD_FIRMWARE: true # 导出固件
+  DEVICES: "PSG1218"
+  UPLOAD_FIRMWARE: true
   ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: github.event.repository.owner.id == github.event.sender.id # 自己点的 start
+    if: github.event.repository.owner.id == github.event.sender.id
+    
     steps:
-      - name: Checkout Master # 1.导入主分支
-        uses: actions/checkout@master
-      - name: Initialization Environment # 2.初始环境的设置
+      - name: Checkout Master
+        uses: actions/checkout@v4  # 更新到稳定版本
+
+      - name: Initialization Environment
         env:
-          DEBIAN_FRONTEND: noninteractive # 非交互模式
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt autoclean
           cd /var/lib/apt
           sudo mv lists lists.old
           sudo mkdir -p lists/partial
-      - name: Build # 3. 执行脚本
+
+      - name: Build Firmware
+        id: build  # 添加ID用于后续步骤引用
         run: |
-          cd ./scripts/                                                # 进入目录
-          sudo chmod +x ./*.sh                                         # 添加编译sh执行权限
-          OUT_DIR="./out/$(date '+%Y-%m-%d')"                          # 输出目录
-          mkdir -p $OUT_DIR                                            # 创建输出目录
-          ./padavan.sh $DEVICES -s -l -o $OUT_DIR # 编译 DEVICES 显示详细日志 关闭代理 修改登录页
-          echo "::set-env name=FILE_NAME::$DEVICES-$(date "+%Y%m%d")"  # 包名
-          echo "::set-env name=IMAGES_PATH::$OUT_DIR"                  # 打包目录
-      - name: Upload Packages # 4. 打包文件并且上传到当前主分支
-        uses: actions/upload-artifact@master
-        if: env.UPLOAD_FIRMWARE == 'true' && success() # 成功才执行
+          cd ./scripts/
+          sudo chmod +x ./*.sh
+          
+          # 创建带时间戳的输出目录
+          OUT_DIR="./out/$(date '+%Y-%m-%d')"
+          mkdir -p $OUT_DIR
+          
+          echo "输出目录: $OUT_DIR"
+          echo "开始构建固件..."
+          
+          # 执行构建脚本并捕获退出状态
+          if ./padavan.sh $DEVICES -s -l -o $OUT_DIR; then
+            echo "构建成功完成"
+            
+            # 检查输出目录是否有文件
+            if [ -n "$(find "$OUT_DIR" -type f -name '*.trx' -o -name '*.bin' | head -n 1)" ]; then
+              echo "找到固件文件"
+              echo "FILE_NAME=$DEVICES-$(date "+%Y%m%d")" >> $GITHUB_ENV
+              echo "IMAGES_PATH=$OUT_DIR" >> $GITHUB_ENV
+              echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
+            else
+              echo "警告: 输出目录中没有找到固件文件"
+              echo "列出输出目录内容:"
+              ls -la "$OUT_DIR" || echo "输出目录不存在"
+              echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "错误: 构建过程失败"
+            echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+            exit 1  # 构建失败时退出
+          fi
+
+      - name: Debug Output Directory
+        if: env.BUILD_SUCCESS == 'false'
+        run: |
+          echo "构建失败，调试信息:"
+          echo "当前工作目录: $(pwd)"
+          echo "目录结构:"
+          find . -name "out" -type d | head -10
+          echo "如果out目录存在，列出其内容:"
+          find "./out/$(date '+%Y-%m-%d')" -type f 2>/dev/null || echo "输出目录不存在"
+
+      - name: Upload Packages
+        uses: actions/upload-artifact@v4  # 更新到稳定版本
+        if: env.UPLOAD_FIRMWARE == 'true' && env.BUILD_SUCCESS == 'true'
         with:
-          name: Padavan-${{env.FILE_NAME}}
+          name: Padavan-${{ env.FILE_NAME }}
           path: ${{ env.IMAGES_PATH }}
+          if-no-files-found: error  # 没有文件时报错而不是静默跳过
+          retention-days: 7  # 设置产物保留天数
+
+      - name: Build Failure Notification
+        if: env.BUILD_SUCCESS == 'false'
+        run: |
+          echo "❌ 固件构建失败，请检查以下可能原因:"
+          echo "1. 编译工具链配置问题"
+          echo "2. 依赖包缺失"
+          echo "3. 源代码或配置文件错误"
+          echo "4. 磁盘空间不足"
+          exit 1
